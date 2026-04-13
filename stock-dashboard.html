@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KodexChart | 한국 주식 분석 대시보드</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin></script>
+  <script src="https://unpkg.com/recharts@2.10.4/umd/Recharts.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #070b14; font-family: 'Noto Sans KR', sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0c1523; }
+    ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 2px; }
+    input:focus { outline: none; }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeInUp 0.35s ease forwards; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      border: 2px solid #1e3a5f;
+      border-top-color: #ef4444;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.8); }
+    }
+    .live-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #10b981;
+      animation: pulse-dot 1.6s ease infinite;
+      box-shadow: 0 0 6px #10b981;
+    }
+
+    @keyframes gauge-fill {
+      from { width: 0%; }
+    }
+    .gauge-fill { animation: gauge-fill 0.9s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#334155;font-family:monospace;gap:14px">
+      <div style="width:32px;height:32px;border:3px solid #1e3a5f;border-top-color:#ef4444;border-radius:50%;animation:spin 0.8s linear infinite"></div>
+      <div style="font-size:13px;letter-spacing:0.1em">스크립트 로딩 중...</div>
+      <div style="font-size:10px;color:#1e3a5f">로딩이 길어지면 F12 → Console 탭의 오류를 확인하세요</div>
+    </div>
+  </div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+    const {
+      ComposedChart, BarChart, Bar, Line, Area,
+      XAxis, YAxis, CartesianGrid, Tooltip,
+      ResponsiveContainer, Cell, ReferenceLine, ReferenceArea,
+    } = Recharts;
+
+    // ── CONSTANTS ────────────────────────────────────────────
+    const UP       = '#ef4444';
+    const DOWN     = '#3b82f6';
+    const MA_COLORS = { ma5: '#f59e0b', ma20: '#10b981', ma60: '#a78bfa' };
+    const BB_COLOR  = '#818cf8';
+    const RSI_COLOR = '#22d3ee';
+
+    const STOCKS = {
+      '005930': { name: '삼성전자',         price: 57800,  vol: 0.025 },
+      '000660': { name: 'SK하이닉스',       price: 172000, vol: 0.030 },
+      '035720': { name: '카카오',           price: 41500,  vol: 0.038 },
+      '035420': { name: 'NAVER',            price: 183000, vol: 0.028 },
+      '005380': { name: '현대차',           price: 218000, vol: 0.022 },
+      '051910': { name: 'LG화학',           price: 243000, vol: 0.026 },
+      '207940': { name: '삼성바이오로직스',  price: 780000, vol: 0.020 },
+      '006400': { name: '삼성SDI',          price: 285000, vol: 0.030 },
+    };
+
+    // ── INDICATOR CALCULATIONS ───────────────────────────────
+    function calcRSI(closes, period = 14) {
+      const rsi = new Array(closes.length).fill(null);
+      if (closes.length < period + 1) return rsi;
+      let avgGain = 0, avgLoss = 0;
+      for (let i = 1; i <= period; i++) {
+        const chg = closes[i] - closes[i - 1];
+        if (chg > 0) avgGain += chg; else avgLoss -= chg;
+      }
+      avgGain /= period; avgLoss /= period;
+      rsi[period] = avgLoss === 0 ? 100 : parseFloat((100 - 100 / (1 + avgGain / avgLoss)).toFixed(2));
+      for (let i = period + 1; i < closes.length; i++) {
+        const chg = closes[i] - closes[i - 1];
+        avgGain = (avgGain * (period - 1) + Math.max(chg,  0)) / period;
+        avgLoss = (avgLoss * (period - 1) + Math.max(-chg, 0)) / period;
+        rsi[i] = avgLoss === 0 ? 100 : parseFloat((100 - 100 / (1 + avgGain / avgLoss)).toFixed(2));
+      }
+      return rsi;
+    }
+
+    function calcBollingerBands(closes, period = 20, mult = 2) {
+      return closes.map((_, i) => {
+        if (i < period - 1) return { bbUpper: null, bbMiddle: null, bbLower: null, bbWidth: null };
+        const slice = closes.slice(i - period + 1, i + 1);
+        const mean  = slice.reduce((s, v) => s + v, 0) / period;
+        const std   = Math.sqrt(slice.reduce((s, v) => s + (v - mean) ** 2, 0) / period);
+        const upper = Math.round(mean + mult * std);
+        const lower = Math.round(mean - mult * std);
+        return { bbUpper: upper, bbMiddle: Math.round(mean), bbLower: lower, bbWidth: upper - lower };
+      });
+    }
+
+    // ── HELPERS ──────────────────────────────────────────────
+    function fmt2(n) { return String(n).padStart(2, '0'); }
+
+    /**
+     * Attaches MA / RSI / BB indicators to a raw OHLCV array.
+     * Works on any length; returns the last 60 bars.
+     */
+    function attachIndicators(raw) {
+      const closes = raw.map(d => d.close);
+      const rsiArr = calcRSI(closes, 14);
+      const bbArr  = calcBollingerBands(closes, 20, 2);
+      const full   = raw.map((d, i) => ({
+        ...d,
+        ma5:      i >= 4  ? Math.round(raw.slice(i-4,  i+1).reduce((s,x) => s+x.close,0)/5)  : null,
+        ma20:     i >= 19 ? Math.round(raw.slice(i-19, i+1).reduce((s,x) => s+x.close,0)/20) : null,
+        ma60:     i >= 59 ? Math.round(raw.slice(i-59, i+1).reduce((s,x) => s+x.close,0)/60) : null,
+        rsi:      rsiArr[i],
+        bbUpper:  bbArr[i].bbUpper,
+        bbMiddle: bbArr[i].bbMiddle,
+        bbLower:  bbArr[i].bbLower,
+        bbWidth:  bbArr[i].bbWidth,
+      }));
+      return full.slice(-60);
+    }
+
+    // ── REAL API: Yahoo Finance via CORS proxy ────────────────
+    //
+    //   Ticker format : 6자리코드.KS (KOSPI) / 6자리코드.KQ (KOSDAQ)
+    //   Proxy chain   : corsproxy.io → allorigins.win (순서대로 시도)
+    //   데이터 소스   : Yahoo Finance v8 chart API (무료·비공식)
+
+    async function fetchWithTimeout(url, ms = 12000) {
+      const ctrl = new AbortController();
+      const id   = setTimeout(() => ctrl.abort(), ms);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(id);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res;
+      } catch (e) {
+        clearTimeout(id);
+        throw e;
+      }
+    }
+
+    async function proxyFetch(targetUrl) {
+      const proxies = [
+        // proxy 1: corsproxy.io — returns raw response body
+        async () => {
+          const r = await fetchWithTimeout(
+            `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`
+          );
+          return r.json();
+        },
+        // proxy 2: allorigins.win — wraps body in { contents: "..." }
+        async () => {
+          const r = await fetchWithTimeout(
+            `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
+          );
+          const w = await r.json();
+          if (!w.contents) throw new Error('allorigins: 빈 응답');
+          return JSON.parse(w.contents);
+        },
+      ];
+
+      let lastErr;
+      for (const proxy of proxies) {
+        try { return await proxy(); } catch (e) { lastErr = e; }
+      }
+      throw new Error(`프록시 서버 응답 실패 — 인터넷 연결을 확인하세요. (${lastErr?.message})`);
+    }
+
+    /**
+     * Fetches real OHLCV data from Yahoo Finance.
+     * Tries .KS (KOSPI) first, then .KQ (KOSDAQ).
+     * @returns {{ data, name, market, lastUpdated }}
+     */
+    async function fetchStockData(code) {
+      let chartResult = null;
+      let market      = '';
+
+      for (const suffix of ['.KS', '.KQ']) {
+        try {
+          const url  = `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`
+                     + `?interval=1d&range=4mo&includePrePost=false&events=div%7Csplit`;
+          const json = await proxyFetch(url);
+
+          const result = json?.chart?.result?.[0];
+          if (!result?.timestamp?.length) continue;
+
+          chartResult = result;
+          market      = suffix === '.KS' ? 'KOSPI' : 'KOSDAQ';
+          break;
+        } catch (_) { /* try next suffix */ }
+      }
+
+      if (!chartResult) {
+        throw new Error(`종목 ${code}를 찾을 수 없습니다. KOSPI·KOSDAQ 모두 조회 실패.`);
+      }
+
+      const meta   = chartResult.meta;
+      const stamps = chartResult.timestamp;
+      const q      = chartResult.indicators?.quote?.[0] ?? {};
+
+      // Build clean OHLCV rows — skip bars with null close
+      const raw = stamps
+        .map((ts, i) => {
+          const c = q.close?.[i];
+          if (c == null || isNaN(c)) return null;
+          const d = new Date(ts * 1000);
+          return {
+            date:   `${fmt2(d.getMonth()+1)}/${fmt2(d.getDate())}`,
+            open:   Math.round(q.open?.[i]   ?? c),
+            high:   Math.round(q.high?.[i]   ?? c),
+            low:    Math.round(q.low?.[i]    ?? c),
+            close:  Math.round(c),
+            volume: Math.round(q.volume?.[i] ?? 0),
+          };
+        })
+        .filter(Boolean);
+
+      if (raw.length < 20) {
+        throw new Error(`데이터 부족: ${raw.length}거래일 (최소 20일 필요)`);
+      }
+
+      // Prefer Korean name from our lookup; fall back to Yahoo's short name
+      const name = STOCKS[code]?.name
+                || meta.shortName
+                || meta.longName
+                || `종목 ${code}`;
+
+      return {
+        data:        attachIndicators(raw),
+        name,
+        market,
+        lastUpdated: new Date().toLocaleTimeString('ko-KR',
+          { hour:'2-digit', minute:'2-digit', second:'2-digit' }),
+      };
+    }
+
+    // ── DEMO FALLBACK: synthetic data ────────────────────────
+    function getKoreanTradingDays(count) {
+      const days = [], d = new Date();
+      d.setHours(0, 0, 0, 0);
+      while (days.length < count) {
+        d.setDate(d.getDate() - 1);
+        if (d.getDay() !== 0 && d.getDay() !== 6) days.unshift(new Date(d));
+      }
+      return days;
+    }
+
+    function generateDemoData(basePrice, volatility) {
+      const days  = getKoreanTradingDays(90);
+      let price   = basePrice * (0.92 + Math.random() * 0.16);
+      const drift = (Math.random() - 0.46) * 0.0015;
+      const raw   = [];
+      for (const d of days) {
+        const ret  = (Math.random() - 0.5 + drift) * volatility;
+        const gap  = (Math.random() - 0.5) * volatility * 0.4;
+        const open  = Math.round(price * (1 + gap));
+        const close = Math.round(price * (1 + ret));
+        const high  = Math.round(Math.max(open,close) * (1 + Math.random()*volatility*0.6));
+        const low   = Math.round(Math.min(open,close) * (1 - Math.random()*volatility*0.6));
+        const vol   = Math.floor(basePrice > 100000
+          ? 500000  + Math.random()*1500000
+          : 5000000 + Math.random()*15000000);
+        raw.push({ date:`${fmt2(d.getMonth()+1)}/${fmt2(d.getDate())}`, open, high, low, close, volume:vol });
+        price = close;
+      }
+      return attachIndicators(raw);
+    }
+
+    // ── AI INSIGHT ENGINE ────────────────────────────────────
+    const TYPE_CFG = {
+      bullish:     { color: '#10b981', bg: '#10b98112', border: '#10b98130', badge: '강세' },
+      bearish:     { color: '#ef4444', bg: '#ef444412', border: '#ef444430', badge: '약세' },
+      warning:     { color: '#f59e0b', bg: '#f59e0b12', border: '#f59e0b30', badge: '주의' },
+      opportunity: { color: '#06b6d4', bg: '#06b6d412', border: '#06b6d430', badge: '기회' },
+      neutral:     { color: '#475569', bg: '#47556912', border: '#47556930', badge: '중립' },
+    };
+
+    function scoreConfig(s) {
+      if (s >= 80) return { label: '강력 매수', color: '#10b981', grade: 'A+' };
+      if (s >= 65) return { label: '매수 관심', color: '#34d399', grade: 'A'  };
+      if (s >= 50) return { label: '중립 관심', color: '#94a3b8', grade: 'B'  };
+      if (s >= 35) return { label: '관망 권고', color: '#f59e0b', grade: 'C'  };
+      return             { label: '위험 구간', color: '#ef4444', grade: 'D'  };
+    }
+
+    /**
+     * Computes all AI insight signals and the composite score.
+     * Pure function — takes the 60-day data array, returns { signals, score }.
+     */
+    function computeInsights(data) {
+      if (!data || data.length < 11) return null;
+
+      const last = data[data.length - 1];
+      const { close, open, volume, ma5, ma20, ma60, bbUpper, bbLower, bbMiddle, rsi } = last;
+      let score = 50;
+      const signals = [];
+
+      // ── 1. TREND ANALYSIS ─────────────────────────────────
+      {
+        const aboveMa5  = ma5  && close > ma5;
+        const aboveMa20 = ma20 && close > ma20;
+        const aboveMa60 = ma60 && close > ma60;
+        const goldAlign = ma5 && ma20 && ma60 && ma5 > ma20 && ma20 > ma60;
+        const deadAlign = ma5 && ma20 && ma60 && ma5 < ma20 && ma20 < ma60;
+
+        let title, desc, type;
+        if (aboveMa5 && aboveMa20 && aboveMa60 && goldAlign) {
+          title = '강력 정배열 상승 추세';
+          desc  = `현재가(${close.toLocaleString()})가 MA5·MA20·MA60 전부 상회. 이평선 정배열 확인 — 강한 상승 모멘텀.`;
+          type  = 'bullish'; score += 25;
+        } else if (aboveMa20 && aboveMa60) {
+          title = '중기 상승 추세 유지';
+          desc  = `MA20·MA60 상회 중. 중기 상승 흐름 지속. MA5 재돌파 시 추세 강화.`;
+          type  = 'bullish'; score += 15;
+        } else if (aboveMa5 && !aboveMa20) {
+          title = '단기 반등 시도';
+          desc  = `MA5 상회 중이나 MA20 미돌파. 추세 전환 여부 확인 필요.`;
+          type  = 'neutral'; score += 5;
+        } else if (!aboveMa5 && !aboveMa20 && !aboveMa60 && deadAlign) {
+          title = '강력 역배열 하락 추세';
+          desc  = `현재가가 MA5·MA20·MA60 전부 하회. 역배열 심화 — 하락 추세 강화 중.`;
+          type  = 'bearish'; score -= 20;
+        } else {
+          title = '이평선 하회 경계';
+          desc  = `이평선 하회 구간 진입. 지지선 회복 여부 주시.`;
+          type  = 'bearish'; score -= 10;
+        }
+        signals.push({ category: '추세 분석', title, desc, type });
+      }
+
+      // ── 2. BOLLINGER BAND VOLATILITY ──────────────────────
+      {
+        let title, desc, type;
+        if (bbUpper && bbLower && bbMiddle) {
+          const range  = bbUpper - bbLower;
+          const bbPos  = range > 0 ? (close - bbLower) / range : 0.5;
+          const bwidth = ((bbUpper - bbLower) / bbMiddle * 100).toFixed(1);
+
+          if (close >= bbUpper) {
+            title = '단기 고점 주의';
+            desc  = `현재가가 BB 상단(${bbUpper.toLocaleString()}) 터치. 단기 과열 신호. 밴드폭 ${bwidth}% — 조정 가능성.`;
+            type  = 'warning'; score -= 10;
+          } else if (close <= bbLower) {
+            title = '과매도 반등 가능성';
+            desc  = `현재가가 BB 하단(${bbLower.toLocaleString()}) 터치. 기술적 반등 구간 진입. 반등 신호 확인 권고.`;
+            type  = 'opportunity'; score += 10;
+          } else if (bbPos >= 0.75) {
+            title = 'BB 상단 근접 경계';
+            desc  = `밴드 내 상위 ${(bbPos * 100).toFixed(0)}% 위치. 단기 저항 접근 구간. 돌파 여부 관찰 필요.`;
+            type  = 'neutral'; score -= 3;
+          } else if (bbPos <= 0.25) {
+            title = 'BB 하단 지지 테스트';
+            desc  = `밴드 내 하위 ${((1 - bbPos) * 100).toFixed(0)}% 위치. 하단 지지선 테스트 중.`;
+            type  = 'neutral'; score += 3;
+          } else {
+            title = '밴드 중단권 안정';
+            desc  = `밴드 내 ${(bbPos * 100).toFixed(0)}% 위치. 정상 변동성 범위 내 — 안정적 흐름.`;
+            type  = 'neutral';
+          }
+        } else {
+          title = '데이터 산출 중'; desc = 'BB 계산 데이터 수집 중.'; type = 'neutral';
+        }
+        signals.push({ category: '변동성 분석', title, desc, type });
+      }
+
+      // ── 3. VOLUME ANALYSIS ────────────────────────────────
+      {
+        const recent10 = data.slice(-11, -1);
+        const avgVol   = recent10.reduce((s, d) => s + d.volume, 0) / recent10.length;
+        const ratio    = volume / avgVol;
+        const isUpDay  = close >= open;
+
+        let title, desc, type;
+        if (ratio >= 1.5) {
+          title = '수급 집중 포착';
+          desc  = `거래량 10일 평균 대비 ${(ratio * 100).toFixed(0)}%. ${isUpDay ? '강한 매수 수급 유입 — 상승 신호.' : '대량 매도 출회 — 하락 압력 주의.'}`;
+          type  = isUpDay ? 'bullish' : 'bearish';
+          score += isUpDay ? 15 : -5;
+        } else if (ratio >= 1.2) {
+          title = '거래량 증가 감지';
+          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 관심 증가 신호 — 방향성 확인 필요.`;
+          type  = 'neutral'; score += 8;
+        } else if (ratio < 0.7) {
+          title = '거래 관심 저조';
+          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 수급 관심 감소 — 유동성 주의.`;
+          type  = 'warning'; score -= 5;
+        } else {
+          title = '거래량 정상 범위';
+          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 정상 수급 상태 유지.`;
+          type  = 'neutral';
+        }
+        signals.push({ category: '거래량 분석', title, desc, type });
+      }
+
+      // ── 4. RSI MOMENTUM ───────────────────────────────────
+      {
+        let title, desc, type;
+        if (rsi != null) {
+          if (rsi >= 70) {
+            title = 'RSI 과매수 경고';
+            desc  = `RSI ${rsi.toFixed(1)} — 과매수 구간 진입. 단기 조정 가능성 높음.`;
+            type  = 'warning'; score -= 8;
+          } else if (rsi >= 55) {
+            title = 'RSI 강세 모멘텀';
+            desc  = `RSI ${rsi.toFixed(1)} — 강세권 안착. 상승 모멘텀 양호.`;
+            type  = 'bullish'; score += 10;
+          } else if (rsi >= 45) {
+            title = 'RSI 중립 구간';
+            desc  = `RSI ${rsi.toFixed(1)} — 중립 구간. 방향성 확인 대기.`;
+            type  = 'neutral';
+          } else if (rsi >= 30) {
+            title = 'RSI 약세 경고';
+            desc  = `RSI ${rsi.toFixed(1)} — 약세권 진입. 하락 압력 지속 중.`;
+            type  = 'bearish'; score -= 5;
+          } else {
+            title = 'RSI 과매도 반등 기대';
+            desc  = `RSI ${rsi.toFixed(1)} — 극단적 과매도. 기술적 반등 신호 대기.`;
+            type  = 'opportunity'; score += 12;
+          }
+        } else {
+          title = '데이터 산출 중'; desc = 'RSI 계산 데이터 수집 중.'; type = 'neutral';
+        }
+        signals.push({ category: 'RSI 모멘텀', title, desc, type });
+      }
+
+      score = Math.max(0, Math.min(100, Math.round(score)));
+      return { signals, score };
+    }
+
+    // ── SIGNAL CARD ──────────────────────────────────────────
+    const CATEGORY_ICON = {
+      '추세 분석':   'M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z',            // trend arrow
+      '변동성 분석': 'M22 12h-4l-3 9L9 3l-3 9H2',                          // wave
+      '거래량 분석': 'M18 20V10M12 20V4M6 20v-6',                          // bars
+      'RSI 모멘텀':  'M13 2L3 14h9l-1 8 10-12h-9l1-8z',                   // lightning
+    };
+
+    const SignalCard = ({ sig }) => {
+      const cfg = TYPE_CFG[sig.type] || TYPE_CFG.neutral;
+      return (
+        <div style={{
+          background: cfg.bg,
+          border: `1px solid ${cfg.border}`,
+          borderLeft: `3px solid ${cfg.color}`,
+          borderRadius: 8,
+          padding: '10px 12px',
+          marginBottom: 8,
+        }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:5 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                stroke={cfg.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d={CATEGORY_ICON[sig.category] || 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'}/>
+              </svg>
+              <span style={{ fontSize:9, color: cfg.color, letterSpacing:'0.08em', opacity:0.8 }}>
+                {sig.category.toUpperCase()}
+              </span>
+            </div>
+            <span style={{
+              fontSize:9, fontWeight:600, color: cfg.color,
+              background:`${cfg.color}18`, padding:'1px 6px',
+              borderRadius:3, letterSpacing:'0.05em',
+              fontFamily:'JetBrains Mono,monospace',
+            }}>
+              {cfg.badge}
+            </span>
+          </div>
+          <div style={{ fontSize:12, fontWeight:600, color:'#e2e8f0', marginBottom:4 }}>
+            {sig.title}
+          </div>
+          <div style={{ fontSize:10, color:'#475569', lineHeight:1.6 }}>
+            {sig.desc}
+          </div>
+        </div>
+      );
+    };
+
+    // ── AI PANEL ─────────────────────────────────────────────
+    const AIPanel = ({ data }) => {
+      const insights = useMemo(() => computeInsights(data), [data]);
+      if (!insights) return null;
+
+      const { signals, score } = insights;
+      const sc = scoreConfig(score);
+      const now = new Date().toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+
+      // Gauge gradient stops
+      const gaugeColor = score >= 65
+        ? 'linear-gradient(to right, #ef4444, #f59e0b 40%, #10b981)'
+        : score >= 35
+        ? 'linear-gradient(to right, #ef4444, #f59e0b)'
+        : 'linear-gradient(to right, #ef4444, #ef4444cc)';
+
+      // Key price levels from last bar
+      const last = data[data.length - 1];
+
+      return (
+        <div style={{
+          background: '#090e1c',
+          border: '1px solid #111d30',
+          borderRadius: 12,
+          overflow: 'hidden',
+        }}>
+
+          {/* ─ Header ─ */}
+          <div style={{
+            background: '#0c1324',
+            padding: '12px 14px',
+            borderBottom: '1px solid #111d30',
+            display: 'flex', alignItems: 'center', gap: 9,
+          }}>
+            <div style={{
+              width: 28, height: 28,
+              background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+              borderRadius: 7,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+              </svg>
+            </div>
+            <div style={{ flex:1 }}>
+              <div className="mono" style={{ fontSize:12, fontWeight:600, color:'#e2e8f0', letterSpacing:'0.05em' }}>
+                AI 인사이트
+              </div>
+              <div style={{ fontSize:9, color:'#1e3a5f', marginTop:1 }}>실시간 기술적 분석</div>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:5 }}>
+              <div className="live-dot"/>
+              <span className="mono" style={{ fontSize:9, color:'#10b981', letterSpacing:'0.06em' }}>LIVE</span>
+            </div>
+          </div>
+
+          {/* ─ Score Section ─ */}
+          <div style={{ padding: '16px 14px 14px' }}>
+            <div style={{ fontSize:9, color:'#1e3a5f', letterSpacing:'0.15em', marginBottom:10 }}>
+              투자 매력도 점수
+            </div>
+
+            {/* Score number + grade */}
+            <div style={{ display:'flex', alignItems:'flex-end', gap:10, marginBottom:12 }}>
+              <div className="mono" style={{
+                fontSize: 52, fontWeight: 600, lineHeight: 1,
+                color: sc.color,
+                textShadow: `0 0 30px ${sc.color}50`,
+              }}>
+                {score}
+              </div>
+              <div style={{ paddingBottom: 6 }}>
+                <div style={{
+                  fontSize:10, fontWeight:700, color: sc.color,
+                  background:`${sc.color}15`, border:`1px solid ${sc.color}30`,
+                  padding:'2px 8px', borderRadius:4,
+                  fontFamily:'JetBrains Mono,monospace',
+                  letterSpacing:'0.05em',
+                  marginBottom:3,
+                }}>
+                  등급 {sc.grade}
+                </div>
+                <div style={{ fontSize:11, color: sc.color, fontWeight:600 }}>{sc.label}</div>
+              </div>
+            </div>
+
+            {/* Gauge bar */}
+            <div style={{ position:'relative', marginBottom: 6 }}>
+              {/* Track */}
+              <div style={{
+                height: 8, borderRadius: 4,
+                background: '#0d1828',
+                border: '1px solid #1a2e45',
+                overflow: 'visible',
+                position: 'relative',
+              }}>
+                {/* Fill */}
+                <div
+                  className="gauge-fill"
+                  style={{
+                    position:'absolute', left:0, top:0, bottom:0,
+                    width:`${score}%`,
+                    borderRadius: 4,
+                    background: gaugeColor,
+                  }}
+                />
+              </div>
+              {/* Marker dot */}
+              <div style={{
+                position: 'absolute',
+                top: '50%', transform: 'translateY(-50%)',
+                left: `clamp(4px, calc(${score}% - 6px), calc(100% - 12px))`,
+                width: 14, height: 14, borderRadius: '50%',
+                background: sc.color,
+                border: '2.5px solid #090e1c',
+                boxShadow: `0 0 10px ${sc.color}80`,
+              }}/>
+            </div>
+
+            {/* Scale labels */}
+            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:2 }}>
+              {['위험', '경계', '중립', '관심', '매수'].map((l, i) => (
+                <span key={l} className="mono" style={{
+                  fontSize: 8, color: '#1a3050',
+                  fontWeight: i === Math.round(score / 25) ? 600 : 400,
+                }}>
+                  {l}
+                </span>
+              ))}
+            </div>
+
+            {/* Tick marks */}
+            <div style={{ display:'flex', justifyContent:'space-between', paddingTop:2 }}>
+              {[0, 25, 50, 75, 100].map(t => (
+                <span key={t} className="mono" style={{ fontSize:8, color:'#0f1e2e' }}>{t}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* ─ Divider ─ */}
+          <div style={{ height:1, background:'#0f1e2e', margin:'0 14px' }}/>
+
+          {/* ─ Signal Cards ─ */}
+          <div style={{ padding:'12px 14px 4px' }}>
+            <div style={{ fontSize:9, color:'#1e3a5f', letterSpacing:'0.15em', marginBottom:10 }}>
+              시그널 분석
+            </div>
+            {signals.map((sig, i) => <SignalCard key={i} sig={sig} />)}
+          </div>
+
+          {/* ─ Key Price Levels ─ */}
+          <div style={{ margin:'0 14px', height:1, background:'#0f1e2e' }}/>
+          <div style={{ padding:'12px 14px' }}>
+            <div style={{ fontSize:9, color:'#1e3a5f', letterSpacing:'0.15em', marginBottom:10 }}>
+              주요 가격 레벨
+            </div>
+            {[
+              { label:'BB 상단', value: last?.bbUpper, color: BB_COLOR,       role:'저항' },
+              { label:'MA 20',  value: last?.ma20,    color: MA_COLORS.ma20, role:'지지/저항' },
+              { label:'MA 60',  value: last?.ma60,    color: MA_COLORS.ma60, role:'중기 지지' },
+              { label:'BB 하단', value: last?.bbLower, color: BB_COLOR,       role:'지지' },
+            ].filter(l => l.value).map(({ label, value, color, role }) => {
+              const isAbove = last?.close > value;
+              return (
+                <div key={label} style={{
+                  display:'flex', alignItems:'center',
+                  justifyContent:'space-between',
+                  marginBottom: 7,
+                }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+                    <div style={{ width:3, height:14, background:color, borderRadius:2 }}/>
+                    <div>
+                      <div className="mono" style={{ fontSize:10, color:'#64748b' }}>{label}</div>
+                      <div style={{ fontSize:8, color:'#1e3a5f' }}>{role}</div>
+                    </div>
+                  </div>
+                  <div style={{ textAlign:'right' }}>
+                    <div className="mono" style={{ fontSize:11, color: color }}>
+                      {value?.toLocaleString()}
+                    </div>
+                    <div style={{ fontSize:8, color: isAbove ? '#10b98170' : '#ef444470' }}>
+                      현재가 {isAbove ? '▲ 위' : '▼ 아래'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ─ Footer ─ */}
+          <div style={{
+            background:'#0c1324',
+            padding:'8px 14px',
+            borderTop:'1px solid #111d30',
+            display:'flex', alignItems:'center', justifyContent:'space-between',
+          }}>
+            <span style={{ fontSize:8, color:'#0f1e2e' }}>AI 생성 분석 · 투자 조언 아님</span>
+            <span className="mono" style={{ fontSize:8, color:'#1a3050' }}>{now}</span>
+          </div>
+        </div>
+      );
+    };
+
+    // ── CANDLESTICK SHAPE ────────────────────────────────────
+    const CandleShape = ({ x, y, width, height, payload }) => {
+      if (!payload || !isFinite(y) || !isFinite(height) || height <= 0) return null;
+      const { open, high, low, close } = payload;
+      const range = high - low;
+      if (range === 0) return null;
+      const isUp    = close >= open;
+      const color   = isUp ? UP : DOWN;
+      const pxOf    = p => y + height * (high - p) / range;
+      const openPx  = pxOf(open);
+      const closePx = pxOf(close);
+      const bodyTop = Math.min(openPx, closePx);
+      const bodyH   = Math.max(Math.abs(closePx - openPx), 1.5);
+      const cx      = x + width / 2;
+      const bw      = Math.max(width * 0.65, 4);
+      return (
+        <g>
+          <line x1={cx} y1={y}             x2={cx} y2={bodyTop}      stroke={color} strokeWidth={1.5}/>
+          <line x1={cx} y1={bodyTop+bodyH} x2={cx} y2={y+height}    stroke={color} strokeWidth={1.5}/>
+          <rect x={cx-bw/2} y={bodyTop} width={bw} height={bodyH}
+            fill={color} stroke={color} strokeWidth={0.5} fillOpacity={isUp ? 0.8 : 1}/>
+        </g>
+      );
+    };
+
+    // ── TOOLTIPS ─────────────────────────────────────────────
+    const PriceTooltip = ({ active, payload, label }) => {
+      if (!active || !payload?.length) return null;
+      const d = payload[0]?.payload;
+      if (!d) return null;
+      const isUp  = d.close >= d.open;
+      const color = isUp ? UP : DOWN;
+      const chg   = d.close - d.open;
+      const pct   = (chg / d.open * 100).toFixed(2);
+      const rc    = d.rsi > 70 ? UP : d.rsi < 30 ? DOWN : RSI_COLOR;
+      return (
+        <div style={{ background:'#09121e', border:`1px solid ${color}35`,
+          borderRadius:7, padding:'10px 14px', fontSize:11,
+          boxShadow:'0 8px 24px rgba(0,0,0,0.6)', minWidth:190 }}>
+          <div style={{ color:'#475569', fontSize:10, marginBottom:6,
+            fontFamily:'Noto Sans KR,sans-serif' }}>{label}</div>
+          {[['시가',d.open?.toLocaleString(),'#94a3b8'],
+            ['고가',d.high?.toLocaleString(),UP],
+            ['저가',d.low?.toLocaleString(),DOWN],
+            ['종가',d.close?.toLocaleString(),color],
+            ['등락',`${chg>=0?'+':''}${chg.toLocaleString()} (${chg>=0?'+':''}${pct}%)`,color],
+          ].map(([k,v,c]) => (
+            <div key={k} className="mono" style={{ display:'flex', justifyContent:'space-between',
+              gap:16, lineHeight:1.9 }}>
+              <span style={{color:'#334155'}}>{k}</span>
+              <span style={{color:c}}>{v}</span>
+            </div>
+          ))}
+          <div style={{ marginTop:6, borderTop:'1px solid #0f1e2e', paddingTop:5,
+            display:'flex', gap:10, flexWrap:'wrap' }}>
+            {d.ma5  && <span className="mono" style={{fontSize:10,color:MA_COLORS.ma5}}>MA5 {d.ma5?.toLocaleString()}</span>}
+            {d.ma20 && <span className="mono" style={{fontSize:10,color:MA_COLORS.ma20}}>MA20 {d.ma20?.toLocaleString()}</span>}
+            {d.ma60 && <span className="mono" style={{fontSize:10,color:MA_COLORS.ma60}}>MA60 {d.ma60?.toLocaleString()}</span>}
+          </div>
+          {d.bbUpper && (
+            <div style={{ marginTop:5, borderTop:'1px solid #0f1e2e', paddingTop:5 }}>
+              <div style={{ fontSize:9, color:'#1e3a5f', marginBottom:3 }}>볼린저 밴드 (20,2σ)</div>
+              <div className="mono" style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:BB_COLOR }}>
+                <span>상 {d.bbUpper?.toLocaleString()}</span>
+                <span style={{color:'#475569'}}>중 {d.bbMiddle?.toLocaleString()}</span>
+                <span>하 {d.bbLower?.toLocaleString()}</span>
+              </div>
+            </div>
+          )}
+          {d.rsi != null && (
+            <div style={{ marginTop:5, borderTop:'1px solid #0f1e2e', paddingTop:5,
+              display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <span className="mono" style={{ fontSize:10, color:rc }}>RSI(14) {d.rsi.toFixed(2)}</span>
+              <span style={{ fontSize:9, color:rc, background:`${rc}15`, padding:'1px 6px', borderRadius:3 }}>
+                {d.rsi > 70 ? '과매수' : d.rsi < 30 ? '과매도' : '중립'}
+              </span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const VolumeTooltip = ({ active, payload, label }) => {
+      if (!active || !payload?.length) return null;
+      return (
+        <div style={{ background:'#09121e', border:'1px solid #1e3a5f',
+          borderRadius:6, padding:'8px 12px' }}>
+          <div style={{color:'#475569',fontSize:10,fontFamily:'Noto Sans KR,sans-serif'}}>{label}</div>
+          <div className="mono" style={{fontSize:11,color:'#94a3b8',marginTop:3}}>
+            거래량 <span style={{color:'#e2e8f0'}}>{payload[0]?.value?.toLocaleString()}</span>
+          </div>
+        </div>
+      );
+    };
+
+    const RSITooltip = ({ active, payload, label }) => {
+      if (!active || !payload?.length) return null;
+      const rsi   = payload.find(p => p.dataKey === 'rsi')?.value;
+      if (rsi == null) return null;
+      const color = rsi > 70 ? UP : rsi < 30 ? DOWN : RSI_COLOR;
+      return (
+        <div style={{ background:'#09121e', border:`1px solid ${color}35`,
+          borderRadius:6, padding:'8px 12px' }}>
+          <div style={{color:'#475569',fontSize:10,fontFamily:'Noto Sans KR,sans-serif'}}>{label}</div>
+          <div className="mono" style={{fontSize:12,color,marginTop:3,fontWeight:600}}>
+            RSI(14) &nbsp;{rsi.toFixed(2)}
+          </div>
+          <div style={{fontSize:9,color,marginTop:3,background:`${color}15`,
+            padding:'2px 6px',borderRadius:3,display:'inline-block'}}>
+            {rsi > 70 ? '과매수 구간 (≥70)' : rsi < 30 ? '과매도 구간 (≤30)' : '중립 구간'}
+          </div>
+        </div>
+      );
+    };
+
+    // ── FORMATTERS ───────────────────────────────────────────
+    const fmtPrice = v => !v ? '' : v >= 100000 ? `${(v/10000).toFixed(0)}만` : v.toLocaleString();
+    const fmtVol   = v => !v ? '' : v >= 1e6 ? `${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : v;
+
+    const XTick = ({ x, y, payload, index, total }) => {
+      if (index % 10 !== 0 && index !== total - 1) return null;
+      return (
+        <text x={x} y={y+11} fill="#2a4a6a" fontSize={9} textAnchor="middle"
+          fontFamily="JetBrains Mono,monospace">{payload.value}</text>
+      );
+    };
+
+    const StatItem = ({ label, value, color }) => (
+      <div style={{ textAlign:'center' }}>
+        <div style={{ fontSize:9, color:'#1e3a5f', marginBottom:3 }}>{label}</div>
+        <div className="mono" style={{ fontSize:11, color: color || '#94a3b8' }}>
+          {typeof value === 'number' ? value.toLocaleString() : value}
+        </div>
+      </div>
+    );
+
+    // ── APP ───────────────────────────────────────────────────
+    function App() {
+      const [inputCode,  setInputCode]  = useState('005930');
+      const [stockData,  setStockData]  = useState(null);
+      const [loading,    setLoading]    = useState(false);
+      const [error,      setError]      = useState('');
+      const [loadingMsg, setLoadingMsg] = useState('');
+
+      // ── real API load ──────────────────────────────────────
+      const loadStock = useCallback((raw) => {
+        const code = raw.trim();
+        if (!/^\d{6}$/.test(code)) {
+          setError('6자리 숫자 종목 코드를 입력해주세요.');
+          return;
+        }
+        setError('');
+        setLoading(true);
+        setLoadingMsg('Yahoo Finance 실시간 시세 조회 중...');
+
+        fetchStockData(code)
+          .then(({ data, name, market, lastUpdated }) => {
+            setStockData({ code, name, data, market, lastUpdated, isDemo: false });
+            setLoading(false);
+          })
+          .catch(err => {
+            setError(`API 오류: ${err.message}`);
+            setLoading(false);
+          });
+      }, []);
+
+      // ── demo fallback ──────────────────────────────────────
+      const loadDemo = useCallback((code) => {
+        const c    = code || '005930';
+        const info = STOCKS[c] || { name:`종목 ${c}`, price: 50000, vol: 0.025 };
+        const data = generateDemoData(info.price, info.vol);
+        setStockData({ code: c, name: info.name, data, market: 'DEMO', lastUpdated: null, isDemo: true });
+        setError('');
+      }, []);
+
+      useEffect(() => { loadStock('005930'); }, []);
+
+      const data   = stockData?.data ?? [];
+      const last   = data[data.length - 1];
+      const prev   = data[data.length - 2];
+      const isUp   = last && prev ? last.close >= prev.close : true;
+      const chg    = last && prev ? last.close - prev.close : 0;
+      const pct    = prev ? (chg / prev.close * 100) : 0;
+      const pColor = isUp ? UP : DOWN;
+
+      const allLows  = data.flatMap(d => [d.low,  d.bbLower].filter(v => v != null));
+      const allHighs = data.flatMap(d => [d.high, d.bbUpper].filter(v => v != null));
+      const priceMin = allLows.length  ? Math.min(...allLows)  : 0;
+      const priceMax = allHighs.length ? Math.max(...allHighs) : 100;
+      const pad      = (priceMax - priceMin) * 0.06;
+
+      const lastRSI  = last?.rsi;
+      const rsiColor = lastRSI > 70 ? UP : lastRSI < 30 ? DOWN : RSI_COLOR;
+
+      // Chart margin shared between all panels so they align on x-axis
+      const CM = { top:8, right:62, bottom:0, left:6 };
+
+      return (
+        <div style={{ minHeight:'100vh', background:'#070b14',
+          padding:'18px 20px', maxWidth:1200, margin:'0 auto' }}>
+
+          {/* ── HEADER ──────────────────────────────── */}
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+            marginBottom:20, paddingBottom:16, borderBottom:'1px solid #0d1e30' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+              <div style={{ width:34, height:34,
+                background:'linear-gradient(135deg,#ef4444 0%,#b91c1c 100%)',
+                borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center',
+                boxShadow:'0 0 16px rgba(239,68,68,0.3)' }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                  stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+                  <polyline points="16 7 22 7 22 13"/>
+                </svg>
+              </div>
+              <div>
+                <div className="mono" style={{ fontSize:15, fontWeight:600, color:'#e2e8f0', letterSpacing:'0.06em' }}>
+                  KODEX<span style={{color:'#ef4444'}}>CHART</span>
+                </div>
+                <div style={{ fontSize:9, color:'#1e3a5f', letterSpacing:'0.2em', marginTop:1 }}>한국 주식 분석 대시보드</div>
+              </div>
+            </div>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8,
+                background:'#0c1624', border:'1px solid #1a3050',
+                borderRadius:8, padding:'0 12px' }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2a4a6a" strokeWidth="2.5">
+                  <circle cx="11" cy="11" r="8"/>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input className="mono" type="text" value={inputCode}
+                  onChange={e => setInputCode(e.target.value.replace(/\D/g,'').slice(0,6))}
+                  onKeyDown={e => e.key === 'Enter' && loadStock(inputCode)}
+                  placeholder="종목코드 6자리" maxLength={6}
+                  style={{ background:'transparent', border:'none', color:'#94a3b8',
+                    fontSize:12, width:115, padding:'9px 0', letterSpacing:'0.12em' }}/>
+              </div>
+              <button onClick={() => loadStock(inputCode)}
+                style={{ background: loading ? '#7f1d1d' : '#ef4444', border:'none',
+                  borderRadius:7, color:'white', padding:'9px 16px', fontSize:12, cursor:'pointer',
+                  fontFamily:'Noto Sans KR,sans-serif', fontWeight:500, transition:'background 0.15s',
+                  display:'flex', alignItems:'center', gap:6 }}>
+                {loading ? <div className="spinner" style={{width:13,height:13}}/> : '조회'}
+              </button>
+            </div>
+          </div>
+
+          {error && (
+            <div style={{
+              display:'flex', alignItems:'center', justifyContent:'space-between',
+              flexWrap:'wrap', gap:10, marginBottom:12,
+              padding:'10px 16px', background:'#1c0808',
+              borderRadius:8, border:'1px solid #3a1010',
+            }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+                  stroke="#fca5a5" strokeWidth="2" strokeLinecap="round">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="8" x2="12" y2="12"/>
+                  <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+                <span style={{ color:'#fca5a5', fontSize:12 }}>{error}</span>
+              </div>
+              <button
+                onClick={() => loadDemo(inputCode)}
+                style={{
+                  background:'#2a1010', border:'1px solid #5a2020', borderRadius:5,
+                  color:'#fca5a5', padding:'4px 12px', fontSize:11, cursor:'pointer',
+                  fontFamily:'Noto Sans KR,sans-serif', whiteSpace:'nowrap',
+                }}>
+                데모 모드로 보기
+              </button>
+            </div>
+          )}
+          {loading && !stockData && (
+            <div style={{ textAlign:'center', padding:'100px 0' }}>
+              <div className="spinner" style={{ margin:'0 auto 16px', width:28, height:28, borderWidth:3 }}/>
+              <div className="mono" style={{ fontSize:11, color:'#1e3a5f', letterSpacing:'0.1em' }}>
+                {loadingMsg || '로딩 중...'}
+              </div>
+              <div style={{ fontSize:9, color:'#0f1e2e', marginTop:8 }}>
+                Yahoo Finance · CORS 프록시 경유 · 최대 12초 소요
+              </div>
+            </div>
+          )}
+
+          {stockData && !loading && (
+            <div className="fade-in">
+
+              {/* ── INFO BAR ────────────────────────── */}
+              <div style={{ background:'#0b1525', border:`1px solid ${pColor}20`,
+                borderRadius:10, padding:'16px 22px', marginBottom:14,
+                display:'flex', alignItems:'center', gap:24, flexWrap:'wrap',
+                boxShadow:`0 0 30px ${pColor}08` }}>
+                <div>
+                  <div style={{ fontSize:20, fontWeight:700, color:'#e2e8f0', lineHeight:1.1 }}>{stockData.name}</div>
+                  <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:3 }}>
+                    <span className="mono" style={{ fontSize:10, color:'#1e3a5f' }}>{stockData.code}</span>
+                    {/* Market badge */}
+                    <span style={{
+                      fontSize:9, fontWeight:600, letterSpacing:'0.06em',
+                      padding:'1px 6px', borderRadius:3,
+                      background: stockData.isDemo ? '#1a2a1a' : '#0d1e35',
+                      color:      stockData.isDemo ? '#4ade80' : '#38bdf8',
+                      border:     `1px solid ${stockData.isDemo ? '#2a4a2a' : '#1e3a5f'}`,
+                      fontFamily:'JetBrains Mono,monospace',
+                    }}>
+                      {stockData.market || 'KRX'}
+                    </span>
+                    {!stockData.isDemo && (
+                      <span style={{ fontSize:9, color:'#1e3a5f' }}>
+                        실시간 {stockData.lastUpdated && `· ${stockData.lastUpdated} 기준`}
+                      </span>
+                    )}
+                    {stockData.isDemo && (
+                      <span style={{ fontSize:9, color:'#4ade8060' }}>시뮬레이션</span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display:'flex', alignItems:'baseline', gap:8 }}>
+                  <span className="mono" style={{ fontSize:30, fontWeight:600, color:pColor, lineHeight:1 }}>
+                    {last?.close?.toLocaleString()}
+                  </span>
+                  <span style={{ fontSize:12, color:'#334155' }}>원</span>
+                </div>
+                <div style={{ background:`${pColor}12`, border:`1px solid ${pColor}28`, borderRadius:7, padding:'7px 14px' }}>
+                  <div className="mono" style={{ fontSize:15, fontWeight:600, color:pColor }}>
+                    {isUp ? '▲' : '▼'} {Math.abs(chg).toLocaleString()}
+                  </div>
+                  <div className="mono" style={{ fontSize:10, color:`${pColor}aa`, marginTop:2 }}>
+                    {chg >= 0 ? '+' : ''}{pct.toFixed(2)}%
+                  </div>
+                </div>
+                <div style={{ marginLeft:'auto', display:'flex', gap:22, flexWrap:'wrap' }}>
+                  <StatItem label="고가"     value={last?.high}    color={UP}       />
+                  <StatItem label="저가"     value={last?.low}     color={DOWN}     />
+                  <StatItem label="시가"     value={last?.open}                     />
+                  <StatItem label="BB 상단"  value={last?.bbUpper} color={BB_COLOR} />
+                  <StatItem label="BB 하단"  value={last?.bbLower} color={BB_COLOR} />
+                  <StatItem label="RSI(14)"
+                    value={lastRSI != null ? lastRSI.toFixed(1) : '—'} color={rsiColor}/>
+                  <StatItem label="거래량"   value={`${(last?.volume/1e6).toFixed(2)}M`}/>
+                </div>
+              </div>
+
+              {/* ── LEGEND ──────────────────────────── */}
+              <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:8,
+                paddingLeft:6, flexWrap:'wrap' }}>
+                {Object.entries(MA_COLORS).map(([k,c]) => (
+                  <div key={k} style={{ display:'flex', alignItems:'center', gap:5 }}>
+                    <div style={{ width:20, height:2, background:c, borderRadius:1 }}/>
+                    <span className="mono" style={{ fontSize:10, color:'#2a4a6a' }}>{k.toUpperCase()}</span>
+                  </div>
+                ))}
+                <div style={{ display:'flex', alignItems:'center', gap:5 }}>
+                  <div style={{ width:20, height:8, background:`${BB_COLOR}18`,
+                    border:`1px dashed ${BB_COLOR}60`, borderRadius:2 }}/>
+                  <span className="mono" style={{ fontSize:10, color:'#2a4a6a' }}>BB(20,2)</span>
+                </div>
+                <div style={{ display:'flex', alignItems:'center', gap:5 }}>
+                  <div style={{ width:20, height:2, background:RSI_COLOR, borderRadius:1 }}/>
+                  <span className="mono" style={{ fontSize:10, color:'#2a4a6a' }}>RSI(14)</span>
+                </div>
+                <div className="mono" style={{ marginLeft:'auto', fontSize:9, color:'#0f1e2e' }}>
+                  {data[0]?.date} ~ {data[data.length-1]?.date} · 60거래일
+                </div>
+              </div>
+
+              {/* ── TWO-COLUMN LAYOUT ─────────────────── */}
+              <div style={{ display:'flex', gap:12, alignItems:'flex-start' }}>
+
+                {/* ── LEFT: CHARTS ───────────────────── */}
+                <div style={{ flex:'1 1 0', minWidth:0 }}>
+
+                  {/* Candlestick + BB */}
+                  <div style={{ background:'#090f1c', border:'1px solid #0d1e30',
+                    borderRadius:10, padding:'14px 6px 6px', marginBottom:8 }}>
+                    <ResponsiveContainer width="100%" height={360}>
+                      <ComposedChart data={data} margin={CM}>
+                        <CartesianGrid strokeDasharray="1 5" stroke="#0d1e2e" vertical={false}/>
+                        <XAxis dataKey="date"
+                          tick={(props) => <XTick {...props} total={data.length} />}
+                          axisLine={{ stroke:'#0d1e2e' }} tickLine={false} interval={0}/>
+                        <YAxis orientation="right" domain={[priceMin - pad, priceMax + pad]}
+                          tickFormatter={fmtPrice}
+                          tick={{ fill:'#1a3050', fontSize:9, fontFamily:'JetBrains Mono,monospace' }}
+                          axisLine={false} tickLine={false} width={58}/>
+                        <Tooltip content={<PriceTooltip />}
+                          cursor={{ stroke:'#1a3050', strokeWidth:1, strokeDasharray:'3 4' }}/>
+                        {/* BB stacked areas */}
+                        <Area type="monotone" dataKey="bbLower" stackId="bb"
+                          stroke={`${BB_COLOR}55`} strokeWidth={1} strokeDasharray="4 3"
+                          fill="transparent" dot={false} isAnimationActive={false} connectNulls={false}/>
+                        <Area type="monotone" dataKey="bbWidth" stackId="bb"
+                          stroke={`${BB_COLOR}55`} strokeWidth={1} strokeDasharray="4 3"
+                          fill={`${BB_COLOR}11`} dot={false} isAnimationActive={false} connectNulls={false}/>
+                        {/* Candlestick */}
+                        <Bar dataKey={d => [d.low, d.high]} shape={<CandleShape />}
+                          isAnimationActive={false} barSize={10}/>
+                        {/* MAs */}
+                        <Line type="monotone" dataKey="ma5"  stroke={MA_COLORS.ma5}
+                          strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls/>
+                        <Line type="monotone" dataKey="ma20" stroke={MA_COLORS.ma20}
+                          strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls/>
+                        <Line type="monotone" dataKey="ma60" stroke={MA_COLORS.ma60}
+                          strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls/>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Volume */}
+                  <div style={{ background:'#090f1c', border:'1px solid #0d1e30',
+                    borderRadius:10, padding:'12px 6px 6px', marginBottom:8 }}>
+                    <div style={{ paddingLeft:14, marginBottom:6 }}>
+                      <span style={{ fontSize:9, color:'#1a3050', letterSpacing:'0.12em' }}>거래량 (VOLUME)</span>
+                    </div>
+                    <ResponsiveContainer width="100%" height={95}>
+                      <BarChart data={data} margin={CM}>
+                        <CartesianGrid strokeDasharray="1 5" stroke="#0d1e2e" vertical={false}/>
+                        <XAxis dataKey="date" tick={false} axisLine={{ stroke:'#0d1e2e' }} tickLine={false}/>
+                        <YAxis orientation="right" tickFormatter={fmtVol}
+                          tick={{ fill:'#1a3050', fontSize:9, fontFamily:'JetBrains Mono,monospace' }}
+                          axisLine={false} tickLine={false} width={58}/>
+                        <Tooltip content={<VolumeTooltip />} cursor={{ fill:'#0d1e2e' }}/>
+                        <Bar dataKey="volume" isAnimationActive={false} maxBarSize={12} radius={[1,1,0,0]}>
+                          {data.map((entry, i) => (
+                            <Cell key={`v-${i}`}
+                              fill={entry.close >= entry.open ? `${UP}70` : `${DOWN}70`}/>
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* RSI */}
+                  <div style={{ background:'#090f1c', border:'1px solid #0d1e30',
+                    borderRadius:10, padding:'12px 6px 8px' }}>
+                    <div style={{ paddingLeft:14, marginBottom:6, display:'flex', alignItems:'center', gap:10 }}>
+                      <span style={{ fontSize:9, color:'#1a3050', letterSpacing:'0.12em' }}>RSI (14)</span>
+                      {lastRSI != null && (
+                        <>
+                          <span className="mono" style={{ fontSize:12, fontWeight:600, color:rsiColor }}>
+                            {lastRSI.toFixed(2)}
+                          </span>
+                          <span style={{ fontSize:9, color:rsiColor,
+                            background:`${rsiColor}15`, padding:'1px 7px', borderRadius:3 }}>
+                            {lastRSI > 70 ? '과매수' : lastRSI < 30 ? '과매도' : '중립'}
+                          </span>
+                        </>
+                      )}
+                      <div style={{ marginLeft:'auto', display:'flex', gap:14, paddingRight:8 }}>
+                        {[['70',UP,'과매수'],['50','#334155','중립'],['30',DOWN,'과매도']].map(([v,c,l]) => (
+                          <div key={v} style={{ display:'flex', alignItems:'center', gap:4 }}>
+                            <div style={{ width:14, height:1, background:c, opacity:0.5 }}/>
+                            <span className="mono" style={{ fontSize:9, color:c, opacity:0.7 }}>{v} {l}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={120}>
+                      <ComposedChart data={data} margin={CM}>
+                        <CartesianGrid strokeDasharray="1 5" stroke="#0d1e2e" vertical={false}/>
+                        <XAxis dataKey="date"
+                          tick={(props) => <XTick {...props} total={data.length} />}
+                          axisLine={{ stroke:'#0d1e2e' }} tickLine={false} interval={0}/>
+                        <YAxis orientation="right" domain={[0, 100]} ticks={[0,30,50,70,100]}
+                          tick={{ fill:'#1a3050', fontSize:9, fontFamily:'JetBrains Mono,monospace' }}
+                          axisLine={false} tickLine={false} width={58}/>
+                        <Tooltip content={<RSITooltip />}
+                          cursor={{ stroke:'#1a3050', strokeWidth:1, strokeDasharray:'3 4' }}/>
+                        <ReferenceArea y1={70} y2={100} fill={`${UP}07`}   stroke="none"/>
+                        <ReferenceArea y1={0}  y2={30}  fill={`${DOWN}07`} stroke="none"/>
+                        <ReferenceLine y={70} stroke={`${UP}45`}   strokeDasharray="4 3" strokeWidth={1}/>
+                        <ReferenceLine y={50} stroke="#1a3050"     strokeDasharray="3 4" strokeWidth={1}/>
+                        <ReferenceLine y={30} stroke={`${DOWN}45`} strokeDasharray="4 3" strokeWidth={1}/>
+                        <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1.5}
+                          dot={false} isAnimationActive={false} connectNulls={false}/>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                </div>{/* end charts column */}
+
+                {/* ── RIGHT: AI PANEL ────────────────── */}
+                <div style={{ width: 272, flexShrink: 0, position: 'sticky', top: 18 }}>
+                  <AIPanel data={data} />
+                </div>
+
+              </div>{/* end two-column */}
+
+              {/* ── FOOTER ──────────────────────────── */}
+              <div style={{ marginTop:12, display:'flex', justifyContent:'space-between', padding:'0 4px' }}>
+                <span className="mono" style={{ fontSize:9, color:'#0d1e2e' }}>
+                  {stockData.isDemo
+                    ? '※ 시뮬레이션 가상 데이터 — 실제 투자 판단에 사용 불가'
+                    : '※ Yahoo Finance 비공식 API 경유 데이터 — 참고용, 투자 조언 아님'}
+                </span>
+                <span className="mono" style={{ fontSize:9, color:'#0d1e2e' }}>
+                  장운영시간 09:00 ~ 15:30 KST · KRX
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
