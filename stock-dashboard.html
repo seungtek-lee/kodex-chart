@@ -312,10 +312,24 @@
      * Computes all AI insight signals and the composite score.
      * Pure function — takes the 60-day data array, returns { signals, score }.
      */
+    // ── INSIGHT HELPERS ──────────────────────────────────────
+    const pct = (a, b) => b ? `${a >= b ? '+' : ''}${((a - b) / b * 100).toFixed(2)}%` : '-';
+    const fmtM = v => v >= 1e6 ? `${(v/1e6).toFixed(2)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : v;
+
+    // Count consecutive bars where predicate is true (from end)
+    function streak(data, predFn) {
+      let n = 0;
+      for (let i = data.length - 1; i >= 0; i--) {
+        if (predFn(data[i])) n++; else break;
+      }
+      return n;
+    }
+
     function computeInsights(data) {
       if (!data || data.length < 11) return null;
 
       const last = data[data.length - 1];
+      const prev = data[data.length - 2] || last;
       const { close, open, volume, ma5, ma20, ma60, bbUpper, bbLower, bbMiddle, rsi } = last;
       let score = 50;
       const signals = [];
@@ -328,124 +342,251 @@
         const goldAlign = ma5 && ma20 && ma60 && ma5 > ma20 && ma20 > ma60;
         const deadAlign = ma5 && ma20 && ma60 && ma5 < ma20 && ma20 < ma60;
 
-        let title, desc, type;
+        // 5-day momentum
+        const d5ago     = data.length >= 6 ? data[data.length - 6] : null;
+        const ret5d     = d5ago ? pct(close, d5ago.close) : '-';
+
+        // MA convergence: is ma5-ma20 gap narrowing?
+        const gapNow  = ma5 && ma20 ? Math.abs(ma5 - ma20) : 0;
+        const gapPrev = prev.ma5 && prev.ma20 ? Math.abs(prev.ma5 - prev.ma20) : 0;
+        const maConv  = gapPrev > 0 ? (gapNow < gapPrev ? '수렴' : '확산') : '-';
+
+        // Consecutive days above/below MA20
+        const ma20Streak = ma20
+          ? streak(data, d => d.ma20 && (aboveMa20 ? d.close > d.ma20 : d.close < d.ma20))
+          : 0;
+
+        let title, desc, type, watchFor;
         if (aboveMa5 && aboveMa20 && aboveMa60 && goldAlign) {
-          title = '강력 정배열 상승 추세';
-          desc  = `현재가(${close.toLocaleString()})가 MA5·MA20·MA60 전부 상회. 이평선 정배열 확인 — 강한 상승 모멘텀.`;
-          type  = 'bullish'; score += 25;
+          title    = '강력 정배열 상승 추세';
+          desc     = `현재가가 MA5·MA20·MA60을 모두 상회하며 이평선 정배열(MA5>MA20>MA60) 완성. 단기·중기·장기 추세가 일치하는 강한 상승 국면.`;
+          type     = 'bullish'; score += 25;
+          watchFor = `MA5(${ma5?.toLocaleString()}) 이탈 여부 — 이탈 시 단기 추세 약화 신호`;
         } else if (aboveMa20 && aboveMa60) {
-          title = '중기 상승 추세 유지';
-          desc  = `MA20·MA60 상회 중. 중기 상승 흐름 지속. MA5 재돌파 시 추세 강화.`;
-          type  = 'bullish'; score += 15;
+          title    = '중기 상승 추세 유지';
+          desc     = `MA20·MA60 상회로 중기 상승 흐름 유지 중. MA5 재돌파 시 정배열 완성되며 추세 강화 예상.`;
+          type     = 'bullish'; score += 15;
+          watchFor = `MA5(${ma5?.toLocaleString()}) 재돌파 시 정배열 전환 신호`;
         } else if (aboveMa5 && !aboveMa20) {
-          title = '단기 반등 시도';
-          desc  = `MA5 상회 중이나 MA20 미돌파. 추세 전환 여부 확인 필요.`;
-          type  = 'neutral'; score += 5;
+          title    = '단기 반등 시도';
+          desc     = `MA5 상회 중이나 MA20 미돌파. 단기 반등이 중기 추세 전환으로 이어질지 확인 필요. 거래량 동반 여부가 핵심.`;
+          type     = 'neutral'; score += 5;
+          watchFor = `MA20(${ma20?.toLocaleString()}) 돌파 여부 — 돌파+거래량 증가 시 추세 전환 가능`;
         } else if (!aboveMa5 && !aboveMa20 && !aboveMa60 && deadAlign) {
-          title = '강력 역배열 하락 추세';
-          desc  = `현재가가 MA5·MA20·MA60 전부 하회. 역배열 심화 — 하락 추세 강화 중.`;
-          type  = 'bearish'; score -= 20;
+          title    = '강력 역배열 하락 추세';
+          desc     = `현재가가 MA5·MA20·MA60 전부 하회하며 역배열(MA5<MA20<MA60) 확인. 단기·중기·장기 추세가 모두 하락으로 정렬된 위험 구간.`;
+          type     = 'bearish'; score -= 20;
+          watchFor = `MA5(${ma5?.toLocaleString()}) 상향 돌파 시 단기 반등 첫 신호`;
         } else {
-          title = '이평선 하회 경계';
-          desc  = `이평선 하회 구간 진입. 지지선 회복 여부 주시.`;
-          type  = 'bearish'; score -= 10;
+          title    = '이평선 하회 경계';
+          desc     = `이평선 하회 구간. 완전한 역배열은 아니나 추세 약화 진행 중. 지지선 회복 여부에 따라 방향성 결정.`;
+          type     = 'bearish'; score -= 10;
+          watchFor = `MA20(${ma20?.toLocaleString()}) 회복 여부 주시`;
         }
-        signals.push({ category: '추세 분석', title, desc, type });
+
+        signals.push({
+          category: '추세 분석', title, desc, type, watchFor,
+          metrics: [
+            { label: 'MA5 이격률',  value: ma5  ? pct(close, ma5)  : '-', highlight: aboveMa5  },
+            { label: 'MA20 이격률', value: ma20 ? pct(close, ma20) : '-', highlight: aboveMa20 },
+            { label: '5일 수익률',  value: ret5d },
+            { label: `MA20 연속 ${aboveMa20 ? '상회' : '하회'}`, value: `${ma20Streak}일`, highlight: ma20Streak > 5 },
+          ],
+        });
       }
 
       // ── 2. BOLLINGER BAND VOLATILITY ──────────────────────
       {
-        let title, desc, type;
+        let title, desc, type, watchFor, metrics;
         if (bbUpper && bbLower && bbMiddle) {
-          const range  = bbUpper - bbLower;
-          const bbPos  = range > 0 ? (close - bbLower) / range : 0.5;
-          const bwidth = ((bbUpper - bbLower) / bbMiddle * 100).toFixed(1);
+          const range   = bbUpper - bbLower;
+          const bbPos   = range > 0 ? (close - bbLower) / range : 0.5;
+          const bwidth  = (range / bbMiddle * 100).toFixed(1);
+
+          // Bandwidth trend: compare vs 5 bars ago
+          const d5ago   = data.length >= 6 ? data[data.length - 6] : null;
+          const bwPrev  = d5ago?.bbUpper && d5ago?.bbLower && d5ago?.bbMiddle
+            ? ((d5ago.bbUpper - d5ago.bbLower) / d5ago.bbMiddle * 100).toFixed(1)
+            : null;
+          const bwTrend = bwPrev
+            ? (parseFloat(bwidth) > parseFloat(bwPrev) ? `↑ 확장 (+${(bwidth - bwPrev).toFixed(1)}%)` : `↓ 수축 (${(bwidth - bwPrev).toFixed(1)}%)`)
+            : '-';
+
+          // Consecutive days touching upper/lower band
+          const upperTouch = streak(data, d => d.bbUpper && d.close >= d.bbUpper);
+          const lowerTouch = streak(data, d => d.bbLower && d.close <= d.bbLower);
+          const midDist    = pct(close, bbMiddle);
+
+          metrics = [
+            { label: '밴드 위치',    value: `${(bbPos * 100).toFixed(0)}%`, highlight: bbPos > 0.8 || bbPos < 0.2 },
+            { label: '밴드폭(σ)',    value: `${bwidth}%` },
+            { label: '밴드폭 추세',  value: bwTrend },
+            { label: '중단(MA20) 이격', value: midDist },
+          ];
 
           if (close >= bbUpper) {
-            title = '단기 고점 주의';
-            desc  = `현재가가 BB 상단(${bbUpper.toLocaleString()}) 터치. 단기 과열 신호. 밴드폭 ${bwidth}% — 조정 가능성.`;
-            type  = 'warning'; score -= 10;
+            title    = '단기 고점 주의';
+            desc     = `현재가가 볼린저 밴드 상단(${bbUpper.toLocaleString()})을 터치. 통계적으로 종가 기준 상단 터치는 평균 회귀 가능성이 높은 구간. 밴드폭 ${bwidth}%로 ${parseFloat(bwidth) > 8 ? '변동성 확대 중' : '좁은 밴드 — 추세 지속 가능'}.`;
+            type     = 'warning'; score -= 10;
+            watchFor = `상단 돌파 후 ${upperTouch}일 연속 — 돌파 지속 시 강한 추세, 복귀 시 조정 시작`;
           } else if (close <= bbLower) {
-            title = '과매도 반등 가능성';
-            desc  = `현재가가 BB 하단(${bbLower.toLocaleString()}) 터치. 기술적 반등 구간 진입. 반등 신호 확인 권고.`;
-            type  = 'opportunity'; score += 10;
+            title    = '과매도 반등 가능성';
+            desc     = `현재가가 볼린저 밴드 하단(${bbLower.toLocaleString()})에 도달. 통계적 과매도 구간 — 하단 터치 후 평균 회귀 반등 가능성 존재. 다만 추세 하락 중이라면 밴드 타고 내리는 경우도 유의.`;
+            type     = 'opportunity'; score += 10;
+            watchFor = `하단 이탈 ${lowerTouch}일 — 거래량 동반 반등 캔들 출현 시 진입 검토`;
           } else if (bbPos >= 0.75) {
-            title = 'BB 상단 근접 경계';
-            desc  = `밴드 내 상위 ${(bbPos * 100).toFixed(0)}% 위치. 단기 저항 접근 구간. 돌파 여부 관찰 필요.`;
-            type  = 'neutral'; score -= 3;
+            title    = 'BB 상단 근접 경계';
+            desc     = `밴드 내 상위 ${(bbPos * 100).toFixed(0)}% 위치로 단기 저항 구간 접근 중. 밴드 상단(${bbUpper.toLocaleString()})이 주요 단기 저항선.`;
+            type     = 'neutral'; score -= 3;
+            watchFor = `상단(${bbUpper.toLocaleString()}) 돌파 여부 — 거래량 동반 돌파 시 추세 지속`;
           } else if (bbPos <= 0.25) {
-            title = 'BB 하단 지지 테스트';
-            desc  = `밴드 내 하위 ${((1 - bbPos) * 100).toFixed(0)}% 위치. 하단 지지선 테스트 중.`;
-            type  = 'neutral'; score += 3;
+            title    = 'BB 하단 지지 테스트';
+            desc     = `밴드 내 하위 ${((1 - bbPos) * 100).toFixed(0)}% 위치로 하단 지지선 테스트 중. 하단(${bbLower.toLocaleString()}) 이탈 여부가 핵심 관전 포인트.`;
+            type     = 'neutral'; score += 3;
+            watchFor = `하단(${bbLower.toLocaleString()}) 이탈 방어 여부 — 이탈 시 추가 하락 경계`;
           } else {
-            title = '밴드 중단권 안정';
-            desc  = `밴드 내 ${(bbPos * 100).toFixed(0)}% 위치. 정상 변동성 범위 내 — 안정적 흐름.`;
-            type  = 'neutral';
+            title    = '밴드 중단권 안정';
+            desc     = `밴드 내 ${(bbPos * 100).toFixed(0)}% 위치로 중앙(MA20=${bbMiddle.toLocaleString()}) 부근에서 안정적 흐름 유지. 변동성 정상 범위.`;
+            type     = 'neutral';
+            watchFor = `밴드폭 ${bwidth}% — ${parseFloat(bwidth) < 5 ? 'BB 스퀴즈 가능성, 조만간 변동성 급등 대비' : '정상 밴드폭 유지 중'}`;
           }
         } else {
           title = '데이터 산출 중'; desc = 'BB 계산 데이터 수집 중.'; type = 'neutral';
+          metrics = []; watchFor = '';
         }
-        signals.push({ category: '변동성 분석', title, desc, type });
+        signals.push({ category: '변동성 분석', title, desc, type, watchFor, metrics });
       }
 
       // ── 3. VOLUME ANALYSIS ────────────────────────────────
       {
-        const recent10 = data.slice(-11, -1);
-        const avgVol   = recent10.reduce((s, d) => s + d.volume, 0) / recent10.length;
-        const ratio    = volume / avgVol;
-        const isUpDay  = close >= open;
+        const recent10  = data.slice(-11, -1);
+        const avgVol    = recent10.reduce((s, d) => s + d.volume, 0) / recent10.length;
+        const ratio     = volume / avgVol;
+        const isUpDay   = close >= open;
 
-        let title, desc, type;
+        // 3-day average vs 10-day average (short-term volume momentum)
+        const avg3      = data.slice(-4, -1).reduce((s, d) => s + d.volume, 0) / 3;
+        const shortTrend = avg3 > avgVol ? `↑ ${(avg3 / avgVol * 100).toFixed(0)}%` : `↓ ${(avg3 / avgVol * 100).toFixed(0)}%`;
+
+        // 10-day accumulation/distribution (up-day vol vs down-day vol)
+        const upVol   = recent10.filter(d => d.close >= d.open).reduce((s, d) => s + d.volume, 0);
+        const dnVol   = recent10.filter(d => d.close <  d.open).reduce((s, d) => s + d.volume, 0);
+        const adRatio = dnVol > 0 ? (upVol / dnVol).toFixed(2) : '∞';
+        const adLabel = parseFloat(adRatio) >= 1.5 ? '수급 우위' : parseFloat(adRatio) <= 0.67 ? '매도 우위' : '균형';
+
+        // Consecutive high-volume days
+        const volStreak = streak(data, d => d.volume > avgVol * 1.2);
+
+        let title, desc, type, watchFor;
         if (ratio >= 1.5) {
-          title = '수급 집중 포착';
-          desc  = `거래량 10일 평균 대비 ${(ratio * 100).toFixed(0)}%. ${isUpDay ? '강한 매수 수급 유입 — 상승 신호.' : '대량 매도 출회 — 하락 압력 주의.'}`;
-          type  = isUpDay ? 'bullish' : 'bearish';
-          score += isUpDay ? 15 : -5;
+          title    = '수급 집중 포착';
+          desc     = `오늘 거래량(${fmtM(volume)})이 10일 평균(${fmtM(Math.round(avgVol))}) 대비 ${(ratio * 100).toFixed(0)}% 수준. ${isUpDay ? '상승 마감과 함께 강한 매수 수급 유입 확인 — 기관/외국인 개입 가능성.' : '하락 마감과 함께 대량 매도 출회 — 차익 실현 또는 패닉 셀링 주의.'}`;
+          type     = isUpDay ? 'bullish' : 'bearish';
+          score   += isUpDay ? 15 : -5;
+          watchFor = isUpDay
+            ? '거래량 급증 후 2~3일 내 주가 지속 여부 — 상승 지속 시 추세 강화, 되돌림 시 세력 물량 소화 구간'
+            : '매도 소진 여부 확인 — 거래량 급감 + 양봉 출현 시 저점 신호 가능';
         } else if (ratio >= 1.2) {
-          title = '거래량 증가 감지';
-          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 관심 증가 신호 — 방향성 확인 필요.`;
-          type  = 'neutral'; score += 8;
+          title    = '거래량 증가 감지';
+          desc     = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%로 소폭 증가. 관심 증가 신호이나 수급 집중이라 보기는 이름. 방향성 동반 여부 확인 필요.`;
+          type     = 'neutral'; score += 8;
+          watchFor = '거래량 150% 이상 돌파 시 수급 집중 신호로 격상';
         } else if (ratio < 0.7) {
-          title = '거래 관심 저조';
-          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 수급 관심 감소 — 유동성 주의.`;
-          type  = 'warning'; score -= 5;
+          title    = '거래 관심 저조';
+          desc     = `오늘 거래량(${fmtM(volume)})이 10일 평균 대비 ${(ratio * 100).toFixed(0)}% 수준. 시장 관심 감소 및 유동성 부족 상태. 거래 부재 중 주가 움직임은 신뢰도 낮음.`;
+          type     = 'warning'; score -= 5;
+          watchFor = '평균 거래량 회복 + 방향성 캔들 출현 시 의미 있는 신호';
         } else {
-          title = '거래량 정상 범위';
-          desc  = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%. 정상 수급 상태 유지.`;
-          type  = 'neutral';
+          title    = '거래량 정상 범위';
+          desc     = `10일 평균 대비 ${(ratio * 100).toFixed(0)}%로 정상 수급 상태. 특이 수급 동향 없이 평온한 거래 흐름.`;
+          type     = 'neutral';
+          watchFor = '거래량 150% 돌파 여부 — 돌파 시 수급 신호 재평가';
         }
-        signals.push({ category: '거래량 분석', title, desc, type });
+
+        signals.push({
+          category: '거래량 분석', title, desc, type, watchFor,
+          metrics: [
+            { label: '10일 평균 대비', value: `${(ratio * 100).toFixed(0)}%`, highlight: ratio >= 1.5 },
+            { label: '3일 거래 추세',  value: shortTrend },
+            { label: '매수/매도 비율', value: `${adRatio}:1 (${adLabel})`, highlight: adLabel !== '균형' },
+            { label: '금일 거래량',    value: fmtM(volume) },
+          ],
+        });
       }
 
       // ── 4. RSI MOMENTUM ───────────────────────────────────
       {
-        let title, desc, type;
+        let title, desc, type, watchFor, metrics;
         if (rsi != null) {
+          // RSI 3-day direction
+          const rsi3 = data.slice(-4, -1).map(d => d.rsi).filter(Boolean);
+          const rsiDir = rsi3.length >= 2
+            ? (rsi > rsi3[rsi3.length - 1]
+                ? `↑ 상승 (+${(rsi - rsi3[rsi3.length - 1]).toFixed(1)})`
+                : `↓ 하락 (${(rsi - rsi3[rsi3.length - 1]).toFixed(1)})`)
+            : '-';
+
+          // Price-RSI divergence (5-day)
+          const d5ago      = data.length >= 6 ? data[data.length - 6] : null;
+          const rsi5ago    = d5ago?.rsi;
+          let divergence   = '없음';
+          if (d5ago && rsi5ago != null) {
+            const pUp = close > d5ago.close;
+            const rUp = rsi  > rsi5ago;
+            if  (pUp && !rUp) divergence = '베어리시 다이버전스';
+            else if (!pUp && rUp) divergence = '불리시 다이버전스';
+          }
+          const divColor = divergence === '베어리시 다이버전스' ? UP
+                         : divergence === '불리시 다이버전스'   ? '#10b981'
+                         : null;
+
+          // Days in current RSI zone
+          const zone      = rsi >= 70 ? 'ob' : rsi <= 30 ? 'os' : 'n';
+          const zoneDays  = streak(data, d => {
+            if (!d.rsi) return false;
+            const z = d.rsi >= 70 ? 'ob' : d.rsi <= 30 ? 'os' : 'n';
+            return z === zone;
+          });
+          const zoneLabel = zone === 'ob' ? '과매수' : zone === 'os' ? '과매도' : '중립';
+
+          metrics = [
+            { label: 'RSI 현재값',    value: rsi.toFixed(2), highlight: rsi > 70 || rsi < 30 },
+            { label: 'RSI 방향(3일)', value: rsiDir },
+            { label: `${zoneLabel} 체류`, value: `${zoneDays}일` },
+            { label: '다이버전스',    value: divergence, highlight: divergence !== '없음', highlightColor: divColor },
+          ];
+
           if (rsi >= 70) {
-            title = 'RSI 과매수 경고';
-            desc  = `RSI ${rsi.toFixed(1)} — 과매수 구간 진입. 단기 조정 가능성 높음.`;
-            type  = 'warning'; score -= 8;
+            title    = 'RSI 과매수 경고';
+            desc     = `RSI ${rsi.toFixed(1)}로 과매수 임계선(70) 상회. 과매수 구간 ${zoneDays}일째 체류. 단기적으로 차익 실현 압력이 높아지는 구간이나, 강한 추세에서는 과매수 상태가 지속될 수 있음.`;
+            type     = 'warning'; score -= 8;
+            watchFor = `RSI 70선 하향 이탈 시 조정 시작 신호 — 특히 음봉+거래량 증가 동반 시 주의`;
           } else if (rsi >= 55) {
-            title = 'RSI 강세 모멘텀';
-            desc  = `RSI ${rsi.toFixed(1)} — 강세권 안착. 상승 모멘텀 양호.`;
-            type  = 'bullish'; score += 10;
+            title    = 'RSI 강세 모멘텀';
+            desc     = `RSI ${rsi.toFixed(1)}로 강세권(55~70) 안착. 과열 없이 건전한 상승 모멘텀 유지 중. 추세 추종 전략에 유리한 구간.`;
+            type     = 'bullish'; score += 10;
+            watchFor = `RSI 55선 이탈 여부 — 이탈 시 모멘텀 약화 신호, 70 돌파 시 추세 가속`;
           } else if (rsi >= 45) {
-            title = 'RSI 중립 구간';
-            desc  = `RSI ${rsi.toFixed(1)} — 중립 구간. 방향성 확인 대기.`;
-            type  = 'neutral';
+            title    = 'RSI 중립 구간';
+            desc     = `RSI ${rsi.toFixed(1)}로 중립 구간(45~55). 매수·매도 세력 균형 상태. 방향성 돌파 전 에너지 축적 구간으로 볼 수 있으나, 추세 부재 상태.`;
+            type     = 'neutral';
+            watchFor = `RSI 50선 기준 — 상향 돌파+유지 시 강세 전환, 하향 이탈 시 약세 전환 신호`;
           } else if (rsi >= 30) {
-            title = 'RSI 약세 경고';
-            desc  = `RSI ${rsi.toFixed(1)} — 약세권 진입. 하락 압력 지속 중.`;
-            type  = 'bearish'; score -= 5;
+            title    = 'RSI 약세 경고';
+            desc     = `RSI ${rsi.toFixed(1)}로 약세권(30~45) 진입. 하락 압력이 우세한 구간. 과매도(30 이하)까지는 아니나 모멘텀 약화 지속 중.`;
+            type     = 'bearish'; score -= 5;
+            watchFor = `RSI 30선 이탈 여부 — 이탈 시 과매도 반등 기회 탐색`;
           } else {
-            title = 'RSI 과매도 반등 기대';
-            desc  = `RSI ${rsi.toFixed(1)} — 극단적 과매도. 기술적 반등 신호 대기.`;
-            type  = 'opportunity'; score += 12;
+            title    = 'RSI 과매도 반등 기대';
+            desc     = `RSI ${rsi.toFixed(1)}로 과매도 임계선(30) 하회. 통계적 과매도 구간으로 기술적 반등 가능성 높음. 다만 추세 하락 확인 후 진입 신호 대기 권고.`;
+            type     = 'opportunity'; score += 12;
+            watchFor = `RSI 30선 상향 돌파 + 양봉 캔들 출현 시 반등 신호 — 거래량 동반 여부 확인`;
           }
         } else {
-          title = '데이터 산출 중'; desc = 'RSI 계산 데이터 수집 중.'; type = 'neutral';
+          title = '데이터 산출 중'; desc = 'RSI 계산 데이터 수집 중.';
+          type = 'neutral'; metrics = []; watchFor = '';
         }
-        signals.push({ category: 'RSI 모멘텀', title, desc, type });
+        signals.push({ category: 'RSI 모멘텀', title, desc, type, watchFor, metrics });
       }
 
       score = Math.max(0, Math.min(100, Math.round(score)));
@@ -461,41 +602,112 @@
     };
 
     const SignalCard = ({ sig }) => {
-      const cfg = TYPE_CFG[sig.type] || TYPE_CFG.neutral;
+      const cfg       = TYPE_CFG[sig.type] || TYPE_CFG.neutral;
+      const [open, setOpen] = useState(false);
+
       return (
         <div style={{
           background: cfg.bg,
           border: `1px solid ${cfg.border}`,
           borderLeft: `3px solid ${cfg.color}`,
           borderRadius: 8,
-          padding: '10px 12px',
           marginBottom: 8,
+          overflow: 'hidden',
         }}>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:5 }}>
-            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
-                stroke={cfg.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d={CATEGORY_ICON[sig.category] || 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z'}/>
-              </svg>
-              <span style={{ fontSize:9, color: cfg.color, letterSpacing:'0.08em', opacity:0.8 }}>
-                {sig.category.toUpperCase()}
-              </span>
+          {/* ── Header (always visible) ─────────────────── */}
+          <div
+            onClick={() => setOpen(o => !o)}
+            style={{ padding:'10px 12px 8px', cursor:'pointer' }}
+          >
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:5 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                  stroke={cfg.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d={CATEGORY_ICON[sig.category] || 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0'}/>
+                </svg>
+                <span style={{ fontSize:9, color:cfg.color, letterSpacing:'0.08em', opacity:0.8 }}>
+                  {sig.category.toUpperCase()}
+                </span>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                <span style={{
+                  fontSize:9, fontWeight:600, color:cfg.color,
+                  background:`${cfg.color}18`, padding:'1px 6px',
+                  borderRadius:3, letterSpacing:'0.05em',
+                  fontFamily:'JetBrains Mono,monospace',
+                }}>{cfg.badge}</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                  stroke="#334155" strokeWidth="2.5" strokeLinecap="round"
+                  style={{ transform: open ? 'rotate(180deg)' : 'none', transition:'transform 0.2s' }}>
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </div>
             </div>
-            <span style={{
-              fontSize:9, fontWeight:600, color: cfg.color,
-              background:`${cfg.color}18`, padding:'1px 6px',
-              borderRadius:3, letterSpacing:'0.05em',
-              fontFamily:'JetBrains Mono,monospace',
-            }}>
-              {cfg.badge}
-            </span>
+
+            {/* Title */}
+            <div style={{ fontSize:12, fontWeight:600, color:'#e2e8f0', marginBottom:4 }}>
+              {sig.title}
+            </div>
+
+            {/* Metrics grid — always shown */}
+            {sig.metrics?.length > 0 && (
+              <div style={{
+                display:'grid', gridTemplateColumns:'1fr 1fr',
+                gap:'3px 8px', marginTop:7,
+                background:'#00000020', borderRadius:5,
+                padding:'7px 8px',
+              }}>
+                {sig.metrics.map(m => (
+                  <div key={m.label}>
+                    <div style={{ fontSize:8, color:'#334155', marginBottom:1 }}>{m.label}</div>
+                    <div className="mono" style={{
+                      fontSize:10, fontWeight:600,
+                      color: m.highlightColor
+                        ? m.highlightColor
+                        : m.highlight
+                        ? cfg.color
+                        : '#94a3b8',
+                    }}>{m.value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-          <div style={{ fontSize:12, fontWeight:600, color:'#e2e8f0', marginBottom:4 }}>
-            {sig.title}
-          </div>
-          <div style={{ fontSize:10, color:'#475569', lineHeight:1.6 }}>
-            {sig.desc}
-          </div>
+
+          {/* ── Expanded detail ─────────────────────────── */}
+          {open && (
+            <div style={{ padding:'0 12px 10px', borderTop:`1px solid ${cfg.border}` }}>
+              {/* Full description */}
+              <div style={{ fontSize:10, color:'#64748b', lineHeight:1.7, marginTop:8 }}>
+                {sig.desc}
+              </div>
+
+              {/* Watch-for section */}
+              {sig.watchFor && (
+                <div style={{
+                  marginTop:9,
+                  background:`${cfg.color}0c`,
+                  border:`1px solid ${cfg.color}25`,
+                  borderRadius:5,
+                  padding:'7px 10px',
+                }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:4 }}>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                      stroke={cfg.color} strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                      <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                    <span style={{ fontSize:9, color:cfg.color, letterSpacing:'0.06em', fontWeight:600 }}>
+                      주시 포인트
+                    </span>
+                  </div>
+                  <div style={{ fontSize:10, color:'#94a3b8', lineHeight:1.6 }}>
+                    {sig.watchFor}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       );
     };
